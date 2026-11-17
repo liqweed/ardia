@@ -137,6 +137,17 @@ function App-Windows {
   return @(Visible-Windows $ids | Where-Object { $_.ClassName -eq $appWindowClass })
 }
 
+function Pick-AppWindow([int]$browserId, [string]$titleHint) {
+  $candidates = @(Visible-Windows @($browserId) | Where-Object { $_.ClassName -eq $appWindowClass })
+  if (-not $candidates.Count) { return $null }
+  $hinted = @($candidates | Where-Object { $_.Title -like "*$titleHint*" })
+  if ($hinted.Count) { return $hinted[-1] }
+  $foreground = [UnloadProbe.Native]::GetForegroundWindow().ToInt64()
+  $front = @($candidates | Where-Object { [long]$_.Handle -eq $foreground })
+  if ($front.Count) { return $front[0] }
+  return $candidates[-1]
+}
+
 function Wait-AppWindow([int]$seconds) {
   $deadline = (Get-Date).AddSeconds($seconds)
   while ((Get-Date) -lt $deadline) {
@@ -337,15 +348,18 @@ function Run-Case([int]$index, [string]$case) {
   $launchLog = Join-Path $dir "launch.log"
   $relaunchLog = Join-Path $dir "relaunch.log"
   $launch = Start-Process -FilePath $exe -ArgumentList "--log-file=`"$launchLog`"", "http://127.0.0.1:$Port$($route)?case=$name" -PassThru
-  $app = Wait-AppWindow 180
-  if (-not $app) { throw "$name`: no app window within 180 s" }
-  $appHandle = [IntPtr]([long]$app.Handle)
-  $oldBrowser = [int]$app.ProcessId
+  $firstApp = Wait-AppWindow 180
+  if (-not $firstApp) { throw "$name`: no app window within 180 s" }
+  $oldBrowser = [int]$firstApp.ProcessId
   Hold-Process $oldBrowser
   $loaded = Wait-ServerLine $mark "request /event/loaded" 45
   Start-Sleep -Seconds 3
+  $pageTitle = if ($route -eq "/plain") { "plain page" } elseif ($route -eq "/unload") { "unload page" } else { "download page" }
+  $app = Pick-AppWindow $oldBrowser "127.0.0.1"
+  if (-not $app) { throw "$name`: the app window went away before the click" }
+  $appHandle = [IntPtr]([long]$app.Handle)
   $windowsBefore = @(Visible-Windows @(Ardia-Processes | ForEach-Object { [int]$_.Id }))
-  $pages = @($windowsBefore | Where-Object { $_.ProcessId -eq $oldBrowser -and $_.ClassName -like "Chrome_WidgetWin*" -and $_.Owner -eq [long]$app.Handle } | Sort-Object { ($_.Right - $_.Left) * ($_.Bottom - $_.Top) } -Descending)
+  $pages = @($windowsBefore | Where-Object { $_.ProcessId -eq $oldBrowser -and $_.ClassName -like "Chrome_WidgetWin*" -and $_.Title -like "$pageTitle*" } | Sort-Object { ($_.Right - $_.Left) * ($_.Bottom - $_.Top) } -Descending)
   if ($pages.Count) {
     $target = $pages[0]
     $x = [int](($target.Left + $target.Right) / 2); $y = [int](($target.Top + $target.Bottom) / 2)
@@ -367,6 +381,10 @@ function Run-Case([int]$index, [string]$case) {
     $partialBefore = @(Partial-Downloads)
   }
   Save-Shot (Join-Path $dir "before-close.png")
+  $closeTarget = Pick-AppWindow $oldBrowser "127.0.0.1"
+  if (-not $closeTarget) { throw "$name`: no app window to close" }
+  $appWindowsAtClose = @(Visible-Windows @($oldBrowser) | Where-Object { $_.ClassName -eq $appWindowClass } | ForEach-Object { Describe-Window $_ })
+  $appHandle = [IntPtr]([long]$closeTarget.Handle)
   $known = @{}
   foreach ($fact in @(Visible-Windows @(Ardia-Processes | ForEach-Object { [int]$_.Id }))) { $known[[long]$fact.Handle] = $true }
   $closeMark = @(Server-Lines).Count
@@ -410,6 +428,7 @@ function Run-Case([int]$index, [string]$case) {
   $script:details.Add("### $Label $name")
   $script:details.Add("")
   $script:details.Add("- launched pid $($launch.Id), app window in browser $oldBrowser; page load beacon: $(if ($loaded) { 'yes' } else { 'no' })")
+  $script:details.Add("- app windows at close: $($appWindowsAtClose -join '; '); close posted to $(Describe-Window $closeTarget)")
   $script:details.Add("- click aim: $aim; foreground $forward; under the point: $hitBefore")
   $script:details.Add("- activation beacon: $(if ($activation) { $activation } else { 'none' })")
   if ($route -eq "/download") { $script:details.Add("- download: $(if ($downloadOpened) { $downloadOpened } else { 'no request' }); files before close: $($partialBefore -join ', '); after the close watch: $($partialAfterClose -join ', '); server: $($slowClosed -join ' / ')") }
@@ -541,6 +560,7 @@ Note "screen $($screen.Width)x$($screen.Height)"
 try {
   New-Item -ItemType Directory -Force -Path $data | Out-Null
   Set-Content -LiteralPath (Join-Path $data "onboarding.json") -Value '{"completedAt":1700000000000,"version":1}' -Encoding utf8NoBOM
+  Set-Content -LiteralPath (Join-Path $data "windows-updates.json") -Value '{"automaticChecks":false,"automaticDownloads":false,"lastCheck":null}' -Encoding utf8NoBOM
   $warmDir = Join-Path $Out "00-warm-up"
   New-Item -ItemType Directory -Force -Path $warmDir | Out-Null
   Start-Process -FilePath $exe -ArgumentList "--log-file=`"$(Join-Path $warmDir 'launch.log')`"" | Out-Null
