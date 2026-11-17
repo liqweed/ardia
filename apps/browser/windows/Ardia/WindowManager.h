@@ -479,6 +479,7 @@ struct WindowManager {
 
   void ReplyToTerminate(bool ok) noexcept {
     if (!m_quitting) return;
+    if (ok && m_quitHeldUntil && GetTickCount64() < m_quitHeldUntil) return;
     if (ok) return Finish();
     m_quitting = false;
     m_quitGeneration++;
@@ -488,15 +489,29 @@ struct WindowManager {
   void Quit() noexcept {
     if (m_quitting) return;
     m_quitting = true;
-    if (!m_context) return Finish();
-    EmitApp("willQuit");
-    After(std::chrono::milliseconds(3000), [this, generation = ++m_quitGeneration]() noexcept {
+    int held = QuitWaitForTest();
+    if (held) {
+      m_quitHeldUntil = GetTickCount64() + static_cast<ULONGLONG>(held);
+      LaunchLog::Write(L"launch", std::wstring(L"test: the quit waits ").append(std::to_wstring(held)).append(L" ms before it unloads"));
+    }
+    if (!m_context && !held) return Finish();
+    if (m_context) EmitApp("willQuit");
+    After(std::chrono::milliseconds(held ? held : 3000), [this, generation = ++m_quitGeneration]() noexcept {
       if (m_quitting && generation == m_quitGeneration) Finish();
     });
   }
 
  private:
   static constexpr UINT_PTR kSubclassId = 0xA2D1A;
+
+  static int QuitWaitForTest() noexcept {
+    std::optional<std::string> asked = AppLaunch::TestValue("quitWaitMs");
+    if (!asked) return 0;
+    char *end = nullptr;
+    long value = std::strtol(asked->c_str(), &end, 10);
+    if (!end || *end != '\0' || value <= 0) return 0;
+    return static_cast<int>(value > 15000 ? 15000 : value);
+  }
   static constexpr double kPopupMinWidth = 200;
   static constexpr double kPopupMinPageHeight = 150;
   static constexpr double kPopupChromeHeight = 60;
@@ -1565,6 +1580,7 @@ struct WindowManager {
   winrt::Windows::Graphics::PointInt32 m_dragOrigin{};
   std::string m_dragId;
   int m_quitGeneration{0};
+  ULONGLONG m_quitHeldUntil{0};
   bool m_finished{false};
 };
 
